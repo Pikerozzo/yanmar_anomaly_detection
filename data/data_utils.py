@@ -1,13 +1,17 @@
 
+from http.client import HTTPException
+import io
+import os
+from typing import List
 import pandas as pd
 import numpy as np
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from fastapi import UploadFile
 
 from statsmodels.tsa.stattools import adfuller
 
 from scipy.signal import welch
 from scipy.stats import kurtosis, skew
-import lightgbm as lgb
 
 
 
@@ -48,8 +52,8 @@ def _extract_single_file_features(args):
 
     # ----- Stationarity -----
     try:
-      adf_p = adfuller(x, maxlag=1, autolag=None).pvalue
-    except Exception:
+      adf_p = float(adfuller(x, maxlag=1, autolag=None,result_object=True).pvalue)
+    except:
       # assumption
       adf_p = 1.0
 
@@ -60,7 +64,7 @@ def _extract_single_file_features(args):
     band_powers = np.empty(len(BANDS))
     for b_idx, (lo, hi) in enumerate(BANDS):
       idx = (f >= lo) & (f < hi)
-      band_powers[b_idx] = np.trapezoid(Pxx[idx], f[idx]) if np.any(idx) else 0.0
+      band_powers[b_idx] = np.trapz(Pxx[idx], f[idx]) if np.any(idx) else 0.0
 
     low_power = band_powers[0]
     high_power = band_powers[-1]
@@ -101,6 +105,7 @@ def _extract_single_file_features(args):
     var_per_ch = sequences.var(axis=1)
     feats['var_ratio_max_min'] = var_per_ch.max() / (var_per_ch.min() + 1e-12)
 
+  feats = {k: float(v) for k, v in feats.items()}
   return file_idx, feats
 
 
@@ -130,9 +135,81 @@ def extract_features(data):
     ch_name = f'ch{ch}'
     ch_cols = [col for col in features.columns if col.startswith(ch_name)]
     channel_feature_dfs[ch] = features[ch_cols].copy()
+
+  # return {
+  #             f"ch{ch}": df.to_dict(orient="records")
+  #             for ch, df in channel_feature_dfs.items()
+  #             }
+    
   return channel_feature_dfs
 
 
+
+def _load_single_file_task(args):
+  idx, file_bytes = args
+  arr = (
+      pd.read_csv(
+          io.BytesIO(file_bytes),
+          sep=r"\s+",  # Handles spaces and tabs automatically
+          header=None,
+          engine="c",  # Forces the high-performance C parser
+      )
+      .to_numpy()
+      .T
+  )
+  return idx, arr
+
+
+async def load_all_files_parallel(files: List[UploadFile]) -> np.ndarray:
+  """Loads N uploaded files in parallel and packs them directly into a pre-allocated
+
+  3D NumPy array of shape (N_files, 4_channels, M_measurements).
+  """
+  n_files = len(files)
+
+  if n_files == 0:
+    raise ValueError("No files found to load.")
+
+  # 1. Read all uploaded files into raw bytes asynchronously
+  file_contents = []
+  for f in files:
+    content = await f.read()
+    file_contents.append(content)
+    await f.close()
+
+  # 2. Load the first file to determine exact dimensions
+  _, first_arr = _load_single_file_task((0, file_contents[0]))
+  n_channels, n_measurements = first_arr.shape  # Expected: (4, 20480)
+
+  # 3. Pre-allocate the final 3D array in memory
+  data = np.empty((n_files, n_channels, n_measurements), dtype=np.float64)
+  data[0] = first_arr
+
+  # 4. Prepare tasks for the remaining files (index + bytes tuples)
+  tasks = [(i, content) for i, content in enumerate(file_contents[1:], start=1)]
+
+  print(f"Loading {n_files} files in parallel...")
+  with ProcessPoolExecutor() as executor:
+    futures = [executor.submit(_load_single_file_task, task) for task in tasks]
+
+    for future in as_completed(futures):
+      idx, arr = future.result()
+      data[idx] = arr
+
+  print(f"Successfully loaded shape: {data.shape}")
+  return data
+
+async def load_and_extract_features(files):
+  try:
+    data = await load_all_files_parallel(files)
+    data_feats = extract_features(data)
+    data_feats = {
+            f"ch{ch}": df.to_dict(orient="records")
+            for ch, df in data_feats.items()
+        }
+    return data, data_feats
+  except Exception as e:
+    raise HTTPException(status_code=500, detail=f"Errore interno durante la predizione: {str(e)}")
 
 # def chunk_dataset(data, chunk_len=1024, overlap=0.5):
 #     files, channels, length = data.shape
@@ -196,34 +273,34 @@ def extract_features(data):
 #   return loader, params
 
 # def restore_dataset(predictions: torch.Tensor,n_files: int,n_chunks: int,original_length: int = None):
-    """
-    Restore flattened chunk predictions to original recordings.
+#     """
+#     Restore flattened chunk predictions to original recordings.
 
-    Input:
-        (files * chunks_per_file, channels, chunk_len)
+#     Input:
+#         (files * chunks_per_file, channels, chunk_len)
 
-    Output:
-        (files, channels, original_length)
-    """
+#     Output:
+#         (files, channels, original_length)
+#     """
 
-    total_chunks, channels, chunk_len = predictions.shape
+#     total_chunks, channels, chunk_len = predictions.shape
 
-    assert total_chunks == n_files * n_chunks, (
-        f"Expected {n_files * n_chunks} chunks, "
-        f"received {total_chunks}"
-    )
+#     assert total_chunks == n_files * n_chunks, (
+#         f"Expected {n_files * n_chunks} chunks, "
+#         f"received {total_chunks}"
+#     )
 
-    # Reverse reshape performed in prepare_dloader
-    restored = predictions.reshape(n_files, n_chunks, channels, chunk_len)
+#     # Reverse reshape performed in prepare_dloader
+#     restored = predictions.reshape(n_files, n_chunks, channels, chunk_len)
 
-    # Reverse permutation performed in prepare_dloader
-    restored = restored.permute(0, 2, 1, 3).contiguous()
+#     # Reverse permutation performed in prepare_dloader
+#     restored = restored.permute(0, 2, 1, 3).contiguous()
 
-    # Concatenate temporal chunks
-    restored = restored.reshape(n_files, channels, n_chunks * chunk_len)
+#     # Concatenate temporal chunks
+#     restored = restored.reshape(n_files, channels, n_chunks * chunk_len)
 
-    # Optionally recover original sequence length
-    if original_length is not None:
-        restored = restored[:, :, :original_length]
+#     # Optionally recover original sequence length
+#     if original_length is not None:
+#         restored = restored[:, :, :original_length]
 
-    return restored
+#     return restored

@@ -1,0 +1,14 @@
+services:
+  anomaly-service:
+    build: .
+    container_name: anomaly_container
+    ports:
+      - "8000:8000"
+    volumes:
+      # Monta i volumi per i dati e i modelli (persistenza)
+      - ./data:/app/data
+      - ./models:/app/models
+      # Monta i volumi per il codice sorgente (per l'hot-reload)
+      - ./src:/app/src
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
