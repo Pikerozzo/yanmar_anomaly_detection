@@ -7,8 +7,7 @@ from sklearn.preprocessing import RobustScaler
 
 from sklearn.model_selection import train_test_split
 
-os.makedirs("models", exist_ok=True)
-
+os.makedirs("models/configs", exist_ok=True)
 
 
 class AnomalyPipeline:
@@ -17,12 +16,8 @@ class AnomalyPipeline:
         self.scaler = None
         self.thresholds = None
 
-    def trained(self):
-        return self.model and self.scaler
-
     def __compute_threshold(self, scores):
         return np.mean(scores) + 3*np.std(scores)
-
 
     def train(self, data):
         try:
@@ -55,9 +50,9 @@ class AnomalyPipeline:
             self.scaler = channel_scaler
             self.thresholds = channel_thresholds
             
-            joblib.dump(self.model, "models/ocsvm_models.joblib")
-            joblib.dump(self.scaler, "models/ocsvm_scalers.joblib")
-            joblib.dump(self.thresholds, "models/thresholds.joblib")
+            joblib.dump(self.model, "models/configs/ocsvm_models.joblib")
+            joblib.dump(self.scaler, "models/configs/ocsvm_scalers.joblib")
+            joblib.dump(self.thresholds, "models/configs/thresholds.joblib")
         except:
             return False
         return True
@@ -68,9 +63,9 @@ class AnomalyPipeline:
         if not self.model or not self.scaler:
             print("LOADING MODELS...")
             try:
-                self.model = joblib.load("models/ocsvm_models.joblib")
-                self.scaler = joblib.load("models/ocsvm_scalers.joblib")
-                self.thresholds = joblib.load("models/thresholds.joblib")
+                self.model = joblib.load("models/configs/ocsvm_models.joblib")
+                self.scaler = joblib.load("models/configs/ocsvm_scalers.joblib")
+                self.thresholds = joblib.load("models/configs/thresholds.joblib")
             except Exception as e:
                 raise RuntimeError("ERRORE: non è stato trovato nessun modello addestrato.", e)
         try:

@@ -1,7 +1,6 @@
 
 from http.client import HTTPException
 import io
-import os
 from typing import List
 import pandas as pd
 import numpy as np
@@ -27,9 +26,6 @@ def _extract_single_file_features(args):
   C, L = sequences.shape
   feats = {}
 
-  # Pre-compute Welch once per file if possible, or per channel
-  # (Welch on 20480 points with nperseg=128 is fast, but we can optimize band extraction)
-  
   for c in range(C):
     x = sequences[c].astype(np.float32)
     prefix = f'ch{c}_'
@@ -117,15 +113,11 @@ def extract_features_parallel(all_seqs):
 
   print(f'Extracting features across {n_files} files in parallel...')
   with ProcessPoolExecutor() as executor:
-    futures = [
-        executor.submit(_extract_single_file_features, task) for task in tasks
-    ]
+    futures = [executor.submit(_extract_single_file_features, task) for task in tasks]
 
     for future in as_completed(futures):
       file_idx, feats = future.result()
       feature_list[file_idx] = feats
-
-
   return pd.DataFrame(feature_list)
 
 def extract_features(data):
@@ -135,28 +127,13 @@ def extract_features(data):
     ch_name = f'ch{ch}'
     ch_cols = [col for col in features.columns if col.startswith(ch_name)]
     channel_feature_dfs[ch] = features[ch_cols].copy()
-
-  # return {
-  #             f"ch{ch}": df.to_dict(orient="records")
-  #             for ch, df in channel_feature_dfs.items()
-  #             }
-    
   return channel_feature_dfs
 
 
 
 def _load_single_file_task(args):
   idx, file_bytes = args
-  arr = (
-      pd.read_csv(
-          io.BytesIO(file_bytes),
-          sep=r"\s+",  # Handles spaces and tabs automatically
-          header=None,
-          engine="c",  # Forces the high-performance C parser
-      )
-      .to_numpy()
-      .T
-  )
+  arr = (pd.read_csv(io.BytesIO(file_bytes), sep=r"\s+", header=None, engine="c").to_numpy().T)
   return idx, arr
 
 
@@ -170,22 +147,18 @@ async def load_all_files_parallel(files: List[UploadFile]) -> np.ndarray:
   if n_files == 0:
     raise ValueError("No files found to load.")
 
-  # 1. Read all uploaded files into raw bytes asynchronously
   file_contents = []
   for f in files:
     content = await f.read()
     file_contents.append(content)
     await f.close()
 
-  # 2. Load the first file to determine exact dimensions
   _, first_arr = _load_single_file_task((0, file_contents[0]))
   n_channels, n_measurements = first_arr.shape  # Expected: (4, 20480)
 
-  # 3. Pre-allocate the final 3D array in memory
   data = np.empty((n_files, n_channels, n_measurements), dtype=np.float64)
   data[0] = first_arr
 
-  # 4. Prepare tasks for the remaining files (index + bytes tuples)
   tasks = [(i, content) for i, content in enumerate(file_contents[1:], start=1)]
 
   print(f"Loading {n_files} files in parallel...")
@@ -210,97 +183,3 @@ async def load_and_extract_features(files):
     return data, data_feats
   except Exception as e:
     raise HTTPException(status_code=500, detail=f"Errore interno durante la predizione: {str(e)}")
-
-# def chunk_dataset(data, chunk_len=1024, overlap=0.5):
-#     files, channels, length = data.shape
-
-#     # 1. Non-overlapping chunks (safely truncates any remainder)
-#     if overlap <= 0:
-#       tot_chunks = length // chunk_len
-#       trimmed = data[:, :, :tot_chunks * chunk_len]
-#       return trimmed.reshape(files, channels, tot_chunks, chunk_len), tot_chunks
-
-#     # 2. Overlapping chunks using explicit stride = chunk_len * (1 - overlap)
-#     if overlap < 1:
-#       stride = max(1, int(chunk_len * (1 - overlap)))
-#       chunks = sliding_window_view(data, window_shape=chunk_len, axis=2)[:, :, ::stride, :]
-#       tot_chunks = len(chunks)
-#       return chunks, tot_chunks
-
-
-# def standardize(data:torch.Tensor, mean:torch.Tensor=None, std:torch.Tensor=None):
-#   if mean is None:
-#       mean = torch.mean(data, dim=(0,2),keepdim=True)
-#   if std is None:
-#       std = torch.std(data, dim=(0,2),keepdim=True)
-#   return (data - mean) / (std + 1e-9), (mean, std)
-
-# def destandardize(data:torch.Tensor, mean:torch.Tensor, std:torch.Tensor):
-#   mean = mean.view(1, -1, 1)
-#   std = std.view(1, -1, 1)
-#   return data * (std + 1e-9) + mean
-
-# # def create_sensor_dataset(dfs:List[pd.DataFrame], aggregate_labels:bool=True, seq_length_seconds:float=1., do_sampling_rate_estimation:bool=False, do_standardize:bool=False, standardize_params:tuple=None, do_detrend:bool=False, detrend_method:str='mean', detrend_mean:torch.Tensor=None) -> SensorDataset:
-# def prepare_dloader(data, standardize_params:tuple=None, do_standardize:bool=False,batch_size:int=32, shuffle:bool=True, is_test=False):
-#   # 1. transform to torch
-#   # 2. reshape to (samples, channels, length)
-#   # 3. standardize
-#   # 4. create DataSet and DataLoader
-
-#   files,channels,chunks,length = data.shape
-#   data = torch.as_tensor(data).float().permute(0, 2, 1, 3).contiguous()
-#   data = data.reshape(-1, channels, length)
-
-#   if do_standardize:
-#     # standardize the data
-#     mean, std = None, None
-#     if standardize_params is not None and len(standardize_params) == 2:
-#       mean, std = standardize_params
-#     data, (mean, std) = standardize(data, mean, std)
-
-#   if is_test:
-#     labels = torch.empty(files*chunks)
-#   else:
-#     labels = torch.zeros(files*chunks)
-#   dataset = TensorDataset(data, labels)
-
-
-#   loader = DataLoader(dataset, shuffle=shuffle, batch_size=32)
-
-#   params = {}
-#   if do_standardize:
-#       params['standardize'] = {'mean': mean, 'std': std}
-#   return loader, params
-
-# def restore_dataset(predictions: torch.Tensor,n_files: int,n_chunks: int,original_length: int = None):
-#     """
-#     Restore flattened chunk predictions to original recordings.
-
-#     Input:
-#         (files * chunks_per_file, channels, chunk_len)
-
-#     Output:
-#         (files, channels, original_length)
-#     """
-
-#     total_chunks, channels, chunk_len = predictions.shape
-
-#     assert total_chunks == n_files * n_chunks, (
-#         f"Expected {n_files * n_chunks} chunks, "
-#         f"received {total_chunks}"
-#     )
-
-#     # Reverse reshape performed in prepare_dloader
-#     restored = predictions.reshape(n_files, n_chunks, channels, chunk_len)
-
-#     # Reverse permutation performed in prepare_dloader
-#     restored = restored.permute(0, 2, 1, 3).contiguous()
-
-#     # Concatenate temporal chunks
-#     restored = restored.reshape(n_files, channels, n_chunks * chunk_len)
-
-#     # Optionally recover original sequence length
-#     if original_length is not None:
-#         restored = restored[:, :, :original_length]
-
-#     return restored

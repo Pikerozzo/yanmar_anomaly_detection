@@ -1,12 +1,11 @@
 import os
 import shutil
-from fastapi import FastAPI, File, UploadFile, HTTPException, status
-from fastapi.responses import JSONResponse, HTMLResponse
-from pydantic import BaseModel, Field
-from typing import List, Union
+from fastapi import FastAPI, UploadFile, HTTPException, status
+from fastapi.responses import HTMLResponse
+from typing import List
 from src.pipeline import AnomalyPipeline
 import pandas as pd
-from data.data_utils import extract_features, load_all_files_parallel, load_and_extract_features
+from data.data_utils import load_and_extract_features
 
 app = FastAPI(
     title="Time Series Anomaly Detection API",
